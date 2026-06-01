@@ -3,12 +3,17 @@ import torch.nn.functional as F
 import os
 from tqdm import tqdm
 import numpy as np
+
 from config.config import default_config as config
 from src.models.transformer import Transformer
 from data_loader.data_loader import get_batch_iterator
+
 from typing import Dict
 
-# --- Initialize the Model and Print Parameters ---
+
+# ==========================
+# 1. 初始化模型
+# ==========================
 
 model = Transformer(
     n_head=config['n_head'],
@@ -18,67 +23,87 @@ model = Transformer(
     N_BLOCKS=config['n_blocks']
 ).to(config['device'])
 
-# Print the total number of parameters
+# 统计参数量
 total_params = sum(p.numel() for p in model.parameters())
-print(f"Total number of parameters in the model: {total_params:,}")
+print(f"模型总参数量: {total_params:,}")
 
-# --- Optimizer Setup and Loss Tracking ---
 
-# Set up the AdamW optimizer with the specified learning rate.
-optimizer = torch.optim.AdamW(model.parameters(), lr=config['t_lr'])
+# ==========================
+# 2. 优化器
+# ==========================
 
-# List to track loss values during training.
+optimizer = torch.optim.AdamW(
+    model.parameters(),
+    lr=config['t_lr']
+)
+
+# 记录训练loss
 losses = []
 
-# Define a window size for averaging recent losses in the training loop.
+# 平滑窗口（用于显示loss趋势）
 AVG_WINDOW = 64
 
-# Helper function to estimate the average loss for training and development data.
+
+# ==========================
+# 3. 验证/评估函数
+# ==========================
+
 @torch.no_grad()
 def estimate_loss(steps: int) -> Dict[str, float]:
     """
-    Evaluate the model on training and development datasets and calculate average loss.
+    在 train / dev 集上评估模型平均loss。
 
-    Args:
-        steps (int): Number of steps to evaluate.
-
-    Returns:
-        dict: Dictionary containing average losses for 'train' and 'dev' splits.
+    用途：
+        - 监控是否过拟合
+        - 判断训练是否收敛
     """
+
     out = {}
-    model.eval()  # Set the model to evaluation mode.
+    model.eval()
 
     for split in ['train', 'dev']:
-        # Select the appropriate data path for the current split.
-        data_path = config['train_path'] if split == 'train' else config['dev_path']
 
-        # Create a batch iterator for evaluation.
-        batch_iterator_eval = get_batch_iterator(
-            data_path, config['t_batch_size'], config['t_context_length'], device=config['device']
+        # 选择数据路径
+        data_path = (
+            config['train_path']
+            if split == 'train'
+            else config['dev_path']
         )
 
-        # Initialize a tensor to track loss values for each evaluation step.
+        # 构造数据迭代器
+        batch_iterator_eval = get_batch_iterator(
+            data_path,
+            config['t_batch_size'],
+            config['t_context_length'],
+            device=config['device']
+        )
+
         losses_eval = torch.zeros(steps)
+
         for k in range(steps):
+
             try:
-                # Fetch a batch and calculate the loss.
                 xb, yb = next(batch_iterator_eval)
+
+                # 前向计算loss
                 _, loss = model(xb, yb)
+
                 losses_eval[k] = loss.item()
+
             except StopIteration:
-                # Handle the case where the data iterator ends early.
-                print(f"Warning: Iterator for {split} ended early.")
+                print(f"{split}数据提前结束")
                 break
 
-        # Compute the mean loss for the current split.
         out[split] = losses_eval[:k + 1].mean()
 
-    model.train()  # Restore the model to training mode.
+    model.train()
     return out
 
-# --- Training Loop ---
 
-# Create a batch iterator for the training data.
+# ==========================
+# 4. 训练数据迭代器
+# ==========================
+
 batch_iterator = get_batch_iterator(
     config['train_path'],
     config['t_batch_size'],
@@ -86,61 +111,102 @@ batch_iterator = get_batch_iterator(
     device=config['device']
 )
 
-# Create a progress bar to monitor training progress.
+
+# ==========================
+# 5. 训练主循环
+# ==========================
+
 pbar = tqdm(range(config['t_train_steps']))
+
 for step in pbar:
+
     try:
-        # Fetch a batch of input and target data.
+        # --------------------------
+        # 取一个batch
+        # --------------------------
         xb, yb = next(batch_iterator)
 
-        # Perform a forward pass and compute the loss.
+        # --------------------------
+        # 前向传播 + loss
+        # --------------------------
         _, loss = model(xb, yb)
 
-        # Record the loss for tracking.
         losses.append(loss.item())
-        pbar.set_description(f"Train loss: {np.mean(losses[-AVG_WINDOW:]):.4f}")
 
-        # Backpropagate the loss and update the model parameters.
+        # 显示滑动平均loss
+        pbar.set_description(
+            f"Train loss: {np.mean(losses[-AVG_WINDOW:]):.4f}"
+        )
+
+        # --------------------------
+        # 反向传播
+        # --------------------------
         optimizer.zero_grad(set_to_none=True)
         loss.backward()
         optimizer.step()
 
-        # Periodically evaluate the model on training and development data.
+        # --------------------------
+        # 定期评估
+        # --------------------------
         if step % config['t_eval_steps'] == 0:
-            evaluation_losses = estimate_loss(config['t_eval_iters'])
-            train_loss = evaluation_losses['train']
-            dev_loss = evaluation_losses['dev']
-            print(f"Step: {step}, Train loss: {train_loss:.4f}, Dev loss: {dev_loss:.4f}")
 
-        # Decay the learning rate at the specified step.
+            evaluation_losses = estimate_loss(
+                config['t_eval_iters']
+            )
+
+            print(
+                f"Step {step} | "
+                f"Train: {evaluation_losses['train']:.4f} | "
+                f"Dev: {evaluation_losses['dev']:.4f}"
+            )
+
+        # --------------------------
+        # 学习率衰减
+        # --------------------------
         if step == config['t_lr_decay_step']:
-            print('Decaying learning rate')
+
+            print("学习率衰减")
+
             for g in optimizer.param_groups:
                 g['lr'] = config['t_lr_decayed']
+
     except StopIteration:
-        # Handle the case where the training data iterator ends early.
-        print("Training data iterator finished early.")
+        print("训练数据迭代结束")
         break
 
-# --- Save Model and Final Evaluation ---
 
-# Create the output directory if it does not exist.
-os.makedirs(config['t_out_path'].split('/')[0], exist_ok=True)
+# ==========================
+# 6. 保存模型
+# ==========================
 
-# Perform a final evaluation of the model on training and development datasets.
+os.makedirs(
+    config['t_out_path'].split('/')[0],
+    exist_ok=True
+)
+
+# 最终评估
 evaluation_losses = estimate_loss(200)
+
 train_loss = evaluation_losses['train']
 dev_loss = evaluation_losses['dev']
 
-# Ensure unique model save path in case the file already exists.
+# 防止覆盖模型
 modified_model_out_path = config['t_out_path']
 save_tries = 0
-while os.path.exists(modified_model_out_path):
-    save_tries += 1
-    model_out_name = os.path.splitext(config['t_out_path'])[0]
-    modified_model_out_path = model_out_name + f"_{save_tries}" + ".pt"
 
-# Save the model's state dictionary, optimizer state, and training metadata.
+while os.path.exists(modified_model_out_path):
+
+    save_tries += 1
+
+    base = os.path.splitext(config['t_out_path'])[0]
+
+    modified_model_out_path = (
+        base + f"_{save_tries}.pt"
+    )
+
+# ==========================
+# 保存checkpoint
+# ==========================
 torch.save(
     {
         'model_state_dict': model.state_dict(),
@@ -152,5 +218,9 @@ torch.save(
     },
     modified_model_out_path
 )
-print(f"Saved model to {modified_model_out_path}")
-print(f"Finished training. Train loss: {train_loss:.4f}, Dev loss: {dev_loss:.4f}")
+
+print(f"模型已保存: {modified_model_out_path}")
+
+print(
+    f"训练完成 | Train loss: {train_loss:.4f} | Dev loss: {dev_loss:.4f}"
+)

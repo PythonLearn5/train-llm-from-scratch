@@ -7,110 +7,254 @@ from tqdm import tqdm
 import argparse
 from typing import Optional
 
-def process_files(input_dir: str, output_file: str, tokenizer_name: str, max_data: Optional[int] = None) -> None:
-    """
-    Process a specified number of lines from each .jsonl.zst file in the input directory
-    and save encoded tokens to an HDF5 file.
 
-    Args:
-        input_dir (str): Directory containing input .jsonl.zst files.
-        output_file (str): Path to the output HDF5 file.
-        tokenizer_name (str): Name of the tiktoken tokenizer to use (e.g., 'r50k_base').
-        max_data (int, optional): Maximum number of lines to process from each file.
-                                  If None, process all lines.
+def process_files(
+    input_dir: str,
+    output_file: str,
+    tokenizer_name: str,
+    max_data: Optional[int] = None
+) -> None:
     """
-    # Print processing strategy based on max_data
+    数据预处理核心函数：
+
+    功能：
+        将 .jsonl.zst 文本数据：
+            → 解压
+            → 提取 text 字段
+            → tokenizer编码
+            → 写入 HDF5（二进制Token流）
+
+    最终输出：
+
+        HDF5:
+            tokens: [int, int, int, ...]
+
+    这是 GPT 训练前的标准数据格式转换步骤。
+
+    参数：
+
+        input_dir:
+            输入数据目录（train / val）
+
+        output_file:
+            输出 HDF5 文件路径
+
+        tokenizer_name:
+            tiktoken tokenizer 名称（如 r50k_base）
+
+        max_data:
+            每个文件最多处理多少条样本（调试用）
+    """
+
     if max_data is not None:
-        print(f"You have chosen max_data = {max_data}. Processing only the top {max_data} JSON objects from each file.")
+        print(
+            f"限制模式: max_data={max_data}，每个文件只处理前 {max_data} 条数据"
+        )
     else:
-        print("Processing all available JSON objects from each file.")
+        print("完整模式: 处理所有 JSON 数据")
 
-    # Load the tokenizer using the provided tokenizer name
+    # ==========================
+    # 初始化 tokenizer
+    # ==========================
     enc = tiktoken.get_encoding(tokenizer_name)
 
-    # Create an HDF5 file for output
+    # ==========================
+    # 创建 HDF5 输出文件
+    # ==========================
     with h5py.File(output_file, 'w') as out_f:
-        # Initialize the dataset for storing tokenized data
-        dataset = out_f.create_dataset('tokens', (0,), maxshape=(None,), dtype='i')
-        start_index = 0  # Track the starting index for the next batch of tokens
 
-        # Process each .jsonl.zst file in the input directory
+        # 一维动态增长的Token数组
+        dataset = out_f.create_dataset(
+            'tokens',
+            (0,),
+            maxshape=(None,),
+            dtype='i'
+        )
+
+        # 当前写入位置
+        start_index = 0
+
+        # ==========================
+        # 遍历所有压缩文件
+        # ==========================
         for filename in sorted(os.listdir(input_dir)):
-            if filename.endswith(".jsonl.zst"):  # Only process .jsonl.zst files
-                in_file = os.path.join(input_dir, filename)
-                print(f"Processing: {in_file}")
 
-                processed_lines = 0  # Counter for processed lines in the current file
+            if not filename.endswith(".jsonl.zst"):
+                continue
 
-                # Open the compressed .jsonl.zst file for reading
-                with zstd.open(in_file, 'rt', encoding='utf-8') as in_f:
-                    # Iterate over each line in the file
-                    for line in tqdm(in_f, desc=f"Processing {filename}", total=max_data if max_data is not None else None):
-                        try:
-                            # Parse the line as JSON
-                            data = json.loads(line)
-                            text = data.get('text')  # Extract the 'text' field from the JSON object
+            in_file = os.path.join(input_dir, filename)
 
-                            if text:
-                                # Tokenize the text and append an end-of-text token
-                                encoded = enc.encode(text + "<|endoftext|>", allowed_special={'<|endoftext|>'})
-                                encoded_len = len(encoded)
+            print(f"\n处理文件: {in_file}")
 
-                                # Resize the dataset to accommodate new tokens
-                                end_index = start_index + encoded_len
-                                dataset.resize(dataset.shape[0] + encoded_len, axis=0)
+            processed_lines = 0
 
-                                # Store the encoded tokens in the dataset
-                                dataset[start_index:end_index] = encoded
-                                start_index = end_index  # Update the start index
-                            else:
-                                # Warn if 'text' key is missing in the JSON object
-                                print(f"Warning: 'text' key missing in line from {filename}")
-                        except json.JSONDecodeError:
-                            # Handle JSON decoding errors
-                            print(f"Warning: Could not decode JSON from line in {filename}")
-                        except Exception as e:
-                            # Handle any other errors
-                            print(f"An error occurred while processing line in {filename}: {e}")
+            # ==========================
+            # 解压读取 zst 文件
+            # ==========================
+            with zstd.open(in_file, 'rt', encoding='utf-8') as in_f:
 
-                        processed_lines += 1
-                        # Stop processing if max_data limit is reached
-                        if max_data is not None and processed_lines >= max_data:
-                            break
+                for line in tqdm(
+                    in_f,
+                    desc=f"Processing {filename}",
+                    total=max_data if max_data else None
+                ):
+
+                    try:
+                        # JSON解析
+                        data = json.loads(line)
+
+                        # 提取文本字段
+                        text = data.get('text')
+
+                        if text:
+
+                            # ==========================
+                            # Tokenization
+                            # ==========================
+                            #
+                            # 添加 endoftext 标记
+                            #
+                            encoded = enc.encode(
+                                text + "<|endoftext|>",
+                                allowed_special={'<|endoftext|>'}
+                            )
+
+                            encoded_len = len(encoded)
+
+                            # ==========================
+                            # 扩展HDF5空间
+                            # ==========================
+                            end_index = start_index + encoded_len
+
+                            dataset.resize(
+                                dataset.shape[0] + encoded_len,
+                                axis=0
+                            )
+
+                            # 写入token
+                            dataset[start_index:end_index] = encoded
+
+                            start_index = end_index
+
+                        else:
+                            print(
+                                f"警告: {filename} 中缺少 text 字段"
+                            )
+
+                    except json.JSONDecodeError:
+                        print(
+                            f"JSON解析失败: {filename}"
+                        )
+
+                    except Exception as e:
+                        print(
+                            f"处理异常: {filename} -> {e}"
+                        )
+
+                    processed_lines += 1
+
+                    # ==========================
+                    # 调试模式限制数据量
+                    # ==========================
+                    if max_data and processed_lines >= max_data:
+                        break
+
 
 def main():
     """
-    Main function to parse arguments, validate directories, and process files.
+    主函数：
+
+    功能：
+        1. 解析命令行参数
+        2. 检查目录
+        3. 处理 train / val 数据
     """
-    # Parse command-line arguments
-    parser = argparse.ArgumentParser(description="Preprocess PILE dataset files and save tokens to HDF5.")
-    parser.add_argument("--train_dir", type=str, default="data/train", help="Directory containing training .jsonl.zst files.")
-    parser.add_argument("--val_dir", type=str, default="data/val", help="Directory containing validation .jsonl.zst files.")
-    parser.add_argument("--out_train_file", type=str, default="data/train/pile_train.h5", help="Path to the output training HDF5 file.")
-    parser.add_argument("--out_val_file", type=str, default="data/val/pile_dev.h5", help="Path to the output validation HDF5 file.")
-    parser.add_argument("--tokenizer_name", type=str, default="r50k_base", help="Name of the tiktoken tokenizer to use.")
-    parser.add_argument("--max_data", type=int, default=1000, help="Maximum number of json objects to process from each file in both train and val datasets (default: 1000).")
+
+    parser = argparse.ArgumentParser(
+        description="将 Pile 数据集转换为 HDF5 Token格式"
+    )
+
+    parser.add_argument(
+        "--train_dir",
+        type=str,
+        default="data/train",
+        help="训练数据目录"
+    )
+
+    parser.add_argument(
+        "--val_dir",
+        type=str,
+        default="data/val",
+        help="验证数据目录"
+    )
+
+    parser.add_argument(
+        "--out_train_file",
+        type=str,
+        default="data/train/pile_train.h5",
+        help="训练集输出HDF5"
+    )
+
+    parser.add_argument(
+        "--out_val_file",
+        type=str,
+        default="data/val/pile_dev.h5",
+        help="验证集输出HDF5"
+    )
+
+    parser.add_argument(
+        "--tokenizer_name",
+        type=str,
+        default="r50k_base",
+        help="tiktoken tokenizer类型"
+    )
+
+    parser.add_argument(
+        "--max_data",
+        type=int,
+        default=1000,
+        help="每个文件最大处理条数（调试用）"
+    )
 
     args = parser.parse_args()
 
-    # Validate the existence of the training and validation directories
+    # ==========================
+    # 校验目录
+    # ==========================
     if not os.path.isdir(args.train_dir):
-        print(f"Error: Training directory not found: {args.train_dir}")
+        print(f"错误: 训练目录不存在 {args.train_dir}")
         return
+
     if not os.path.isdir(args.val_dir):
-        print(f"Error: Validation directory not found: {args.val_dir}")
+        print(f"错误: 验证目录不存在 {args.val_dir}")
         return
 
-    # Process training data
-    print("Starting training data preprocessing...")
-    process_files(args.train_dir, args.out_train_file, args.tokenizer_name, args.max_data)
-    print("Training data preprocessing complete.")
+    # ==========================
+    # 处理训练集
+    # ==========================
+    print("\n===== 开始处理训练集 =====")
+    process_files(
+        args.train_dir,
+        args.out_train_file,
+        args.tokenizer_name,
+        args.max_data
+    )
 
-    # Process validation data
-    print("Starting validation data preprocessing...")
-    process_files(args.val_dir, args.out_val_file, args.tokenizer_name, args.max_data)
-    print("Validation data preprocessing complete.")
+    print("训练集处理完成")
 
-# Entry point of the script
+    # ==========================
+    # 处理验证集
+    # ==========================
+    print("\n===== 开始处理验证集 =====")
+    process_files(
+        args.val_dir,
+        args.out_val_file,
+        args.tokenizer_name,
+        args.max_data
+    )
+
+    print("验证集处理完成")
+
+
 if __name__ == "__main__":
     main()

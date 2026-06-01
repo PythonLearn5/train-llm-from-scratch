@@ -4,78 +4,194 @@ import requests
 from tqdm import tqdm
 from typing import List
 
-# Base URL for the dataset files
+
+# ==========================
+# 数据集基础地址
+# ==========================
+#
+# 使用 HuggingFace 上的 Pile 子集（无版权版本）
+#
 BASE_URL = "https://huggingface.co/datasets/monology/pile-uncopyrighted/resolve/main"
-VAL_URL = f"{BASE_URL}/val.jsonl.zst"  # URL for the validation dataset
-TRAIN_URLS = [f"{BASE_URL}/train/{i:02d}.jsonl.zst" for i in range(65)]  # URLs for 65 training files (adjust the range if needed)
+
+# 验证集地址
+VAL_URL = f"{BASE_URL}/val.jsonl.zst"
+
+# 训练集文件列表（共65个分片）
+TRAIN_URLS = [
+    f"{BASE_URL}/train/{i:02d}.jsonl.zst"
+    for i in range(65)
+]
+
 
 def download_file(url: str, file_name: str) -> None:
     """
-    Downloads a file from the given URL and saves it with the specified file name.
-    Displays a progress bar using tqdm.
-    
-    Args:
-        url (str): The URL of the file to download.
-        file_name (str): The local path where the file will be saved.
-    """
-    print(f"Downloading: {file_name}...")
-    response = requests.get(url, stream=True)  # Stream the file content
-    total_size = int(response.headers.get('content-length', 0))  # Get total file size if available
-    block_size = 1024  # Size of each block for the progress bar
-    with open(file_name, 'wb') as f:  # Open file for writing in binary mode
-        for chunk in tqdm(response.iter_content(block_size), total=total_size // block_size, desc="Downloading", leave=True):
-            f.write(chunk)  # Write each chunk to the file
+    从指定URL下载文件，并保存到本地。
 
-def download_dataset(val_url: str, train_urls: List[str], val_dir: str, train_dir: str, max_train_files: int) -> None:
+    特点：
+        - 流式下载（避免内存占用过高）
+        - tqdm显示进度条
+
+    参数：
+
+        url:
+            文件下载地址
+
+        file_name:
+            本地保存路径
     """
-    Manages downloading of the dataset, including both validation and training files.
-    
-    Args:
-        val_url (str): URL for the validation dataset.
-        train_urls (list): List of URLs for the training dataset files.
-        val_dir (str): Directory where the validation file will be stored.
-        train_dir (str): Directory where the training files will be stored.
-        max_train_files (int): Maximum number of training files to download.
+
+    print(f"开始下载: {file_name} ...")
+
+    # 发起HTTP请求（流式）
+    response = requests.get(url, stream=True)
+
+    # 文件总大小（用于进度条）
+    total_size = int(response.headers.get('content-length', 0))
+
+    # 每次读取1KB
+    block_size = 1024
+
+    # 写入文件
+    with open(file_name, 'wb') as f:
+
+        # tqdm进度条
+        for chunk in tqdm(
+            response.iter_content(block_size),
+            total=total_size // block_size,
+            desc="Downloading",
+            leave=True
+        ):
+            f.write(chunk)
+
+
+def download_dataset(
+    val_url: str,
+    train_urls: List[str],
+    val_dir: str,
+    train_dir: str,
+    max_train_files: int
+) -> None:
     """
-    # Define the path for the validation file
+    下载完整数据集（训练集 + 验证集）。
+
+    数据结构：
+
+        data/
+          ├── train/
+          │     ├── 00.jsonl.zst
+          │     ├── 01.jsonl.zst
+          │     └── ...
+          └── val/
+                └── val.jsonl.zst
+
+    参数：
+
+        val_url:
+            验证集下载地址
+
+        train_urls:
+            训练集分片URL列表
+
+        val_dir:
+            验证集存储目录
+
+        train_dir:
+            训练集存储目录
+
+        max_train_files:
+            最多下载多少个训练分片
+    """
+
+    # ==========================
+    # 下载验证集
+    # ==========================
     val_file_path = os.path.join(val_dir, "val.jsonl.zst")
-    if not os.path.exists(val_file_path):  # Check if the validation file already exists
-        print(f"Validation file not found. Downloading from {val_url}...")
-        download_file(val_url, val_file_path)  # Download the validation file
-    else:
-        print("Validation data already present. Skipping download.")
 
-    # Loop through the training file URLs and download if not already present
-    for idx, url in enumerate(train_urls[:max_train_files]):  # Limit to max_train_files
-        file_name = f"{idx:02d}.jsonl.zst"  # Format file name (e.g., 00.jsonl.zst)
-        file_path = os.path.join(train_dir, file_name)  # Construct the full file path
-        if not os.path.exists(file_path):  # Check if the file already exists
-            print(f"Training file {file_name} not found. Downloading...")
-            download_file(url, file_path)  # Download the training file
+    if not os.path.exists(val_file_path):
+
+        print(f"未找到验证集，开始下载: {val_url}")
+
+        download_file(val_url, val_file_path)
+
+    else:
+        print("验证集已存在，跳过下载")
+
+    # ==========================
+    # 下载训练集
+    # ==========================
+    for idx, url in enumerate(train_urls[:max_train_files]):
+
+        file_name = f"{idx:02d}.jsonl.zst"
+
+        file_path = os.path.join(train_dir, file_name)
+
+        if not os.path.exists(file_path):
+
+            print(f"未找到训练文件 {file_name}，开始下载...")
+
+            download_file(url, file_path)
+
         else:
-            print(f"Training file {file_name} already present. Skipping download.")
+            print(f"训练文件 {file_name} 已存在，跳过")
+
 
 def main() -> None:
     """
-    Main function to parse arguments and orchestrate the dataset download process.
+    主函数：
+
+    负责：
+        1. 解析命令行参数
+        2. 创建目录
+        3. 启动数据下载流程
     """
-    # Parse command-line arguments using argparse
-    parser = argparse.ArgumentParser(description="Download PILE dataset.")  # Description of the script
-    parser.add_argument('--train_max', type=int, default=1, help="Max number of training files to download.")  # Max training files
-    parser.add_argument('--train_dir', default="data/train", help="Directory for storing training data.")  # Training directory
-    parser.add_argument('--val_dir', default="data/val", help="Directory for storing validation data.")  # Validation directory
 
-    args = parser.parse_args()  # Parse the arguments provided by the user
+    parser = argparse.ArgumentParser(
+        description="下载 Pile 数据集（HuggingFace版本）"
+    )
 
-    # Ensure directories for training and validation data exist
-    os.makedirs(args.train_dir, exist_ok=True)  # Create training directory if it doesn't exist
-    os.makedirs(args.val_dir, exist_ok=True)  # Create validation directory if it doesn't exist
+    # 最多下载多少训练文件
+    parser.add_argument(
+        '--train_max',
+        type=int,
+        default=1,
+        help="最多下载多少个训练分片"
+    )
 
-    # Start downloading the dataset
-    download_dataset(VAL_URL, TRAIN_URLS, args.val_dir, args.train_dir, args.train_max)
+    # 训练集目录
+    parser.add_argument(
+        '--train_dir',
+        default="data/train",
+        help="训练数据存储目录"
+    )
 
-    print("Dataset downloaded successfully.")  # Indicate successful download
+    # 验证集目录
+    parser.add_argument(
+        '--val_dir',
+        default="data/val",
+        help="验证数据存储目录"
+    )
+
+    args = parser.parse_args()
+
+    # ==========================
+    # 创建目录（如果不存在）
+    # ==========================
+    os.makedirs(args.train_dir, exist_ok=True)
+    os.makedirs(args.val_dir, exist_ok=True)
+
+    # ==========================
+    # 开始下载数据
+    # ==========================
+    download_dataset(
+        VAL_URL,
+        TRAIN_URLS,
+        args.val_dir,
+        args.train_dir,
+        args.train_max
+    )
+
+    print("数据集下载完成")
+
 
 if __name__ == "__main__":
-    # Entry point of the script
     main()

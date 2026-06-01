@@ -1,78 +1,248 @@
 import torch
 import numpy as np
 import h5py
+
 from typing import Iterator, Tuple
 
-def get_batch_iterator(data_path: str, batch_size: int, context_length: int, device: str = "cpu") -> Iterator[Tuple[torch.Tensor, torch.Tensor]]:
-    """
-    Creates an iterator for generating batches of data from an HDF5 file.
 
-    Args:
-        data_path (str): Path to the HDF5 file containing tokenized data.
-        batch_size (int): Number of sequences in each batch.
-        context_length (int): Length of each sequence.
-        device (str, optional): Device to load the data onto ('cpu' or 'cuda'). Defaults to "cpu".
-
-    Yields:
-        tuple: A tuple containing input sequences (xb) and target sequences (yb).
+def get_batch_iterator(
+    data_path: str,
+    batch_size: int,
+    context_length: int,
+    device: str = "cpu"
+) -> Iterator[Tuple[torch.Tensor, torch.Tensor]]:
     """
-    # Open the HDF5 file in read mode
+    GPT训练数据迭代器。
+    功能：
+        从HDF5文件中读取Token数据，
+        按照固定长度切分成训练样本，
+        并持续生成Batch。
+    数据格式：
+        HDF5
+          └── tokens
+    例如：
+        tokens:
+        [1,2,3,4,5,6,7,8,9...]
+
+    context_length=4
+    生成：
+        X=[1,2,3,4]
+        Y=[2,3,4,5]
+
+        X=[5,6,7,8]
+        Y=[6,7,8,9]
+    参数：
+        data_path:
+            HDF5文件路径
+        batch_size:
+            每个Batch包含多少条样本
+        context_length:
+            上下文长度
+        device:
+            cpu 或 cuda
+    返回：
+        生成器
+        每次返回：
+            xb:
+                输入Token
+            yb:
+                目标Token
+    """
+
+    # ==========================
+    # 打开HDF5文件
+    # ==========================
     with h5py.File(data_path, 'r') as hdf5_file:
 
-        # Extract the dataset of tokenized sequences
+        # 获取Token数据集
+        #
+        # HDF5结构：
+        #
+        # root
+        #  └── tokens
+        #
         dataset = hdf5_file['tokens']
 
-        # Get the total size of the dataset
+        # 数据总长度
+        #
+        # 例如：
+        #
+        # [1,2,3,...100000]
+        #
         dataset_size = dataset.shape[0]
 
-        # Calculate the number of examples (sequences) that can be made from the data
-        n_examples = (dataset_size - 1) // context_length
+        # ==========================
+        # 计算可生成样本数
+        # ==========================
+        #
+        # 每个样本长度：
+        #
+        # context_length + 1
+        #
+        # 因为：
+        #
+        # X需要context_length
+        # Y需要向后偏移1位
+        #
+        n_examples = (
+            dataset_size - 1
+        ) // context_length
 
-        # Create an array of indices for examples and shuffle them for randomness
-        example_idxs = np.arange(n_examples)
-        np.random.shuffle(example_idxs)
+        # ==========================
+        # 构造样本索引
+        # ==========================
+        #
+        # [0,1,2,3,4...]
+        #
+        example_idxs = np.arange(
+            n_examples
+        )
 
-        # Initialize epoch counter and example counter
+        # 打乱顺序
+        np.random.shuffle(
+            example_idxs
+        )
+
+        # Epoch计数器
         epochs = 0
+
+        # 当前样本位置
         counter = 0
 
+        # 无限循环
+        #
+        # Trainer不断next()
+        #
         while True:
-            # Check if the current batch exceeds the number of available examples
+
+            # ==========================
+            # Epoch结束检查
+            # ==========================
             if counter + batch_size > n_examples:
-                # Shuffle the indices again and reset the counter to 0
-                np.random.shuffle(example_idxs)
+
+                np.random.shuffle(
+                    example_idxs
+                )
+
                 counter = 0
-                print(f"Finished epoch {epochs}")  # Print epoch number when an epoch finishes
-                epochs += 1  # Increment the epoch counter
 
-            # Select a batch of random indices to generate sequences
-            random_indices = example_idxs[counter:counter+batch_size] * context_length
+                print(
+                    f"Finished epoch {epochs}"
+                )
 
-            # Retrieve sequences from the dataset based on the random indices
-            random_samples = torch.tensor(np.array([dataset[idx:idx+context_length+1] for idx in random_indices]))
+                epochs += 1
 
-            # Separate the input sequences (xb) and target sequences (yb)
-            xb = random_samples[:, :context_length].to(device)  # Input sequence (first half of the random sample)
-            yb = random_samples[:, 1:context_length+1].to(device)  # Target sequence (second half of the random sample)
+            # ==========================
+            # 获取Batch索引
+            # ==========================
+            #
+            # 例如：
+            #
+            # [5,20,31,8]
+            #
+            random_indices = (
+                example_idxs[
+                    counter:counter + batch_size
+                ]
+                * context_length
+            )
 
-            # Increment the counter to move to the next batch
+            # ==========================
+            # 读取数据
+            # ==========================
+            #
+            # 每个样本长度：
+            #
+            # context_length + 1
+            #
+            # 例如：
+            #
+            # [10,20,30,40,50]
+            #
+            random_samples = torch.tensor(
+                np.array([
+                    dataset[
+                        idx:
+                        idx + context_length + 1
+                    ]
+                    for idx in random_indices
+                ])
+            )
+
+            # ==========================
+            # 构造输入X
+            # ==========================
+            #
+            # [10,20,30,40]
+            #
+            xb = random_samples[
+                :,
+                :context_length
+            ].to(device)
+
+            # ==========================
+            # 构造目标Y
+            # ==========================
+            #
+            # [20,30,40,50]
+            #
+            yb = random_samples[
+                :,
+                1:context_length + 1
+            ].to(device)
+
+            # 移动到下一个Batch
             counter += batch_size
 
-            # Yield the input and target sequences as a tuple for the current batch
             yield xb, yb
 
+
 if __name__ == '__main__':
-    # Example Usage (requires a dummy HDF5 file for testing)
-    # Create a dummy HDF5 file
+
+    # ====================================
+    # 测试代码
+    # ====================================
+
     import os
+
     dummy_data_path = "dummy_data.h5"
+
+    # 如果测试文件不存在
     if not os.path.exists(dummy_data_path):
-        with h5py.File(dummy_data_path, 'w') as f:
-            f.create_dataset('tokens', data=np.arange(1000))
+
+        with h5py.File(
+            dummy_data_path,
+            'w'
+        ) as f:
+
+            # 创建测试Token
+            #
+            # [0,1,2...999]
+            #
+            f.create_dataset(
+                'tokens',
+                data=np.arange(1000)
+            )
 
     batch_size = 4
+
     context_length = 10
-    for xb, yb in get_batch_iterator(dummy_data_path, batch_size, context_length):
-        print("Input Batch Shape:", xb.shape)
-        print("Target Batch Shape:", yb.shape)
-        break
+
+    # 获取Batch生成器
+    data_iter = get_batch_iterator(
+        dummy_data_path,
+        batch_size,
+        context_length
+    )
+
+    # 读取一个Batch
+    xb, yb = next(data_iter)
+
+    print("输入形状:", xb.shape)
+    print("目标形状:", yb.shape)
+
+    print("\n输入样本:")
+    print(xb[0])
+
+    print("\n目标样本:")
+    print(yb[0])
