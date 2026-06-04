@@ -40,7 +40,7 @@ python scripts/data_preprocess.py
 
 训练模型，请运行：
 python scripts/train_transformer.py
-
+python -m scripts.train_transformer
 要使用训练好的模型生成文本，请运行：
 
 python scripts/generate_text.py --model_path models/your_model.pth --input_text hi
