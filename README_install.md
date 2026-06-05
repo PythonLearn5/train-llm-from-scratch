@@ -43,7 +43,8 @@ python scripts/train_transformer.py
 python -m scripts.train_transformer
 要使用训练好的模型生成文本，请运行：
 
-python scripts/generate_text.py --model_path models/your_model.pth --input_text hi
+python scripts/generate_text.py --model_path models/transformer_B.pt --input_text hi
+python -m scripts.generate_text --model_path models/transformer_B.pt --input_text hi
 该脚本支持以下参数：
 --model_path：通往已训练模型的路径。
 --input_text：用于生成新文本的初始文本提示。
